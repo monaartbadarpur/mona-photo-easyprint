@@ -7,32 +7,67 @@ import os
 import threading
 from PIL import Image
 
-# Point rembg directly to the local models directory
-os.environ["U2NET_HOME"] = os.path.join(os.path.dirname(__file__), "models")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "u2netp.onnx")
 
-# Photos larger than this (in pixels, longest side) are shrunk before
-# processing, so the free Render server does not run out of memory.
-MAX_SIDE = 2000
+# Photos larger than this (longest side, in pixels) are shrunk first
+MAX_SIDE = 1200
 
 _session = None
 _lock = threading.Lock()
 
 
 def get_session():
-    """Load the AI model only when first needed, not at server startup."""
+    """Load the small AI model only when first needed."""
     global _session
     if _session is None:
         with _lock:
             if _session is None:
-                from rembg import new_session  # lazy import (heavy)
-                _session = new_session("u2netp")
+                import onnxruntime as ort
+
+                opts = ort.SessionOptions()
+                opts.intra_op_num_threads = 1
+                opts.enable_cpu_mem_arena = False   # saves memory
+                opts.enable_mem_pattern = False     # saves memory
+                _session = ort.InferenceSession(
+                    MODEL_PATH,
+                    sess_options=opts,
+                    providers=["CPUExecutionProvider"],
+                )
     return _session
+
+
+def remove_background(img: Image.Image) -> Image.Image:
+    import numpy as np
+
+    session = get_session()
+    img = img.convert("RGB")
+    w, h = img.size
+
+    # Prepare the image for the u2netp model (320 x 320 input)
+    small = img.resize((320, 320), Image.BILINEAR)
+    arr = np.asarray(small, dtype=np.float32)
+    arr = arr / max(float(arr.max()), 1e-6)
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    arr = (arr - mean) / std
+    arr = arr.transpose(2, 0, 1)[None, :, :, :].astype(np.float32)
+
+    # Run the model
+    input_name = session.get_inputs()[0].name
+    pred = session.run(None, {input_name: arr})[0][0, 0]
+
+    # Turn the model output into a mask, then resize it to the photo size
+    pred = (pred - pred.min()) / (pred.max() - pred.min() + 1e-8)
+    mask = Image.fromarray((pred * 255).astype("uint8")).resize((w, h), Image.LANCZOS)
+
+    result = img.copy()
+    result.putalpha(mask)
+    return result
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # The port is already open when this runs.
-    # Warm up the model in the background so the first request is faster.
+    # The port is already open here; warm up the model in the background
     threading.Thread(target=get_session, daemon=True).start()
     yield
 
@@ -56,30 +91,15 @@ def health():
 @app.post("/remove-bg")
 def remove_bg(
     file: UploadFile = File(...),
-    alpha_matting: bool = Form(False),
+    alpha_matting: bool = Form(False),  # accepted but ignored in this slim version
 ):
-    # Plain "def" (not "async def") so the heavy work runs in a worker thread
-    # and the server stays responsive.
-    from rembg import remove  # lazy import (heavy)
-
     try:
         img = Image.open(file.file).convert("RGB")
 
-        # Shrink very large photos to protect server memory
         if max(img.size) > MAX_SIDE:
             img.thumbnail((MAX_SIDE, MAX_SIDE), Image.LANCZOS)
 
-        if alpha_matting:
-            result = remove(
-                img,
-                session=get_session(),
-                alpha_matting=True,
-                alpha_matting_foreground_threshold=240,
-                alpha_matting_background_threshold=10,
-                alpha_matting_erode_size=10,
-            )
-        else:
-            result = remove(img, session=get_session())
+        result = remove_background(img)
 
         buf = io.BytesIO()
         result.save(buf, format="PNG")
