@@ -1,14 +1,17 @@
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+import os
+
+# Point rembg directly to the local models directory
+os.environ["U2NET_HOME"] = os.path.join(os.path.dirname(__file__), "models")
+
 from rembg import remove, new_session
 from PIL import Image
 import io
-import os
 
 app = FastAPI(title="Background Removal API")
 
-# Updated CORS to allow your deployed frontend on Render + Localhost
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -21,20 +24,16 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
+]
 
-# Fast model loads at start (using default standard cache directory)
-fast_session = new_session("u2netp")
-
-# HD model session reference
-hd_session = None
-
-def get_hd_session():
-    global hd_session
-    if hd_session is None:
-        hd_session = new_session("u2netp")
-    return hd_session
-
+# Initialize the lightweight model session from local folder
+print("Initializing rembg session from local models...")
+try:
+    fast_session = new_session("u2netp")
+    print("Session initialized successfully!")
+except Exception as e:
+    print("Error initializing session:", e)
+    fast_session = None
 
 @app.get("/")
 def root():
@@ -52,13 +51,13 @@ async def remove_bg(file: UploadFile = File(...), mode: str = Form("fast")):
     try:
         input_bytes = await file.read()
 
-        # RAM protection: Resize huge images to max 1500px dimension
+        # RAM protection: Resize huge images to max 1200px dimension
         try:
             img = Image.open(io.BytesIO(input_bytes))
-            img.verify()  # Verify it's a valid image
-            img = Image.open(io.BytesIO(input_bytes))  # Reopen after verify
+            img.verify()
+            img = Image.open(io.BytesIO(input_bytes))
             
-            max_dimension = 1500
+            max_dimension = 1200
             if max(img.size) > max_dimension:
                 img.thumbnail((max_dimension, max_dimension))
                 buffer = io.BytesIO()
@@ -68,25 +67,15 @@ async def remove_bg(file: UploadFile = File(...), mode: str = Form("fast")):
         except Exception as img_err:
             print("Image preprocessing warning:", img_err)
 
-        if mode == "hd":
-            try:
-                output_bytes = remove(
-                    input_bytes,
-                    session=get_hd_session(),
-                    alpha_matting=True,
-                    alpha_matting_foreground_threshold=240,
-                    alpha_matting_background_threshold=10,
-                    alpha_matting_erode_size=10,
-                )
-            except Exception as matting_error:
-                print("HD smoothing failed, using normal mode:", matting_error)
-                output_bytes = remove(input_bytes, session=fast_session)
-        else:
+        if fast_session:
             output_bytes = remove(input_bytes, session=fast_session)
+        else:
+            output_bytes = remove(input_bytes, model_name="u2netp")
 
         return StreamingResponse(io.BytesIO(output_bytes), media_type="image/png")
 
     except Exception as e:
+        print("Background removal execution error:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
