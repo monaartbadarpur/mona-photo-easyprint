@@ -27,11 +27,10 @@ fast_session = new_session("u2netp")
 # HD model loads only the first time HD is used
 hd_session = None
 
-
 def get_hd_session():
     global hd_session
     if hd_session is None:
-        hd_session = new_session("u2net")
+        hd_session = new_session("u2netp")
     return hd_session
 
 
