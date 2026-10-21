@@ -24,16 +24,22 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-]
+)
 
-# Initialize the lightweight model session from local folder
-print("Initializing rembg session from local models...")
-try:
-    fast_session = new_session("u2netp")
-    print("Session initialized successfully!")
-except Exception as e:
-    print("Error initializing session:", e)
-    fast_session = None
+# Lazy session initialization to prevent startup port-binding timeouts
+fast_session = None
+
+def get_fast_session():
+    global fast_session
+    if fast_session is None:
+        print("Initializing rembg fast session...")
+        try:
+            fast_session = new_session("u2netp")
+            print("Session initialized successfully!")
+        except Exception as e:
+            print("Error initializing session:", e)
+    return fast_session
+
 
 @app.get("/")
 def root():
@@ -67,8 +73,9 @@ async def remove_bg(file: UploadFile = File(...), mode: str = Form("fast")):
         except Exception as img_err:
             print("Image preprocessing warning:", img_err)
 
-        if fast_session:
-            output_bytes = remove(input_bytes, session=fast_session)
+        session = get_fast_session()
+        if session:
+            output_bytes = remove(input_bytes, session=session)
         else:
             output_bytes = remove(input_bytes, model_name="u2netp")
 
