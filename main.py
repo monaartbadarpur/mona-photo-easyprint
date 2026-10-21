@@ -2,6 +2,7 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from rembg import remove, new_session
+from PIL import Image
 import io
 import os
 
@@ -10,12 +11,16 @@ os.environ["U2NET_HOME"] = "./models"
 
 app = FastAPI(title="Background Removal API")
 
+# Updated CORS to allow your deployed frontend on Render + Localhost
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://desktop-passport-frontend.onrender.com",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,6 +35,8 @@ hd_session = None
 def get_hd_session():
     global hd_session
     if hd_session is None:
+    # You can keep u2netp for RAM safety, or switch to 'u2net' if you want slightly sharper edges in HD mode 
+    # and your server has enough headroom. For 512MB RAM, sticking to u2netp is safest.
         hd_session = new_session("u2netp")
     return hd_session
 
@@ -49,6 +56,24 @@ async def remove_bg(file: UploadFile = File(...), mode: str = Form("fast")):
 
     try:
         input_bytes = await file.read()
+
+        # Optional RAM protection: Resize huge images to max 1500px dimension
+        try:
+            img = Image.open(io.BytesIO(input_bytes))
+            img.verify() # Verify it's a valid image
+            img = Image.open(io.BytesIO(input_bytes)) # Reopen after verify
+            
+            max_dimension = 1500
+            if max(img.size) > max_dimension:
+                img.thumbnail((max_dimension, max_dimension))
+                buffer = io.BytesIO()
+                # Keep original format or save as PNG/JPEG for processing
+                img_format = img.format if img.format in ["PNG", "JPEG"] else "JPEG"
+                img.save(buffer, format=img_format)
+                input_bytes = buffer.getvalue()
+        except Exception as img_err:
+            print("Image preprocessing warning:", img_err)
+            # Proceed with raw bytes if PIL pre-check fails
 
         if mode == "hd":
             try:
@@ -72,7 +97,6 @@ async def remove_bg(file: UploadFile = File(...), mode: str = Form("fast")):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-import os
 import uvicorn
 
 if __name__ == "__main__":
